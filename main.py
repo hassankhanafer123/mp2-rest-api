@@ -15,14 +15,43 @@ storage = DatasetStorage()
 @app.get("/health", response_model=HealthResponse)
 def health_check():
     """Return the application status and version."""
-    pass
+    return HealthResponse(status="ok", version="1.0.0")
 
 @app.post("/upload", response_model=DatasetInfo)
 async def upload_dataset(file: UploadFile = File(...)):
     """Read and store a CSV upload."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".csv":
+        logger.warning("Unsupported file format: %s", suffix)
+        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+
+    contents = await file.read()
+    try:
+        df = pd.read_csv(io.BytesIO(contents))
+    except pd.errors.EmptyDataError:
+        logger.warning("Empty CSV upload: %s", file.filename)
+        raise HTTPException(status_code=400, detail="The uploaded CSV file is empty.")
+    except pd.errors.ParserError:
+        logger.warning("Could not parse CSV: %s", file.filename)
+        raise HTTPException(status_code=400, detail="The uploaded file is not a valid CSV.")
+    except UnicodeDecodeError:
+        logger.warning("Could not decode CSV: %s", file.filename)
+        raise HTTPException(status_code=400, detail="The CSV must be UTF-8 encoded.")
+
+    dataset_id = storage.save(df, file.filename)
+    logger.info("Uploaded dataset: id=%d, filename=%s, rows=%d", dataset_id, file.filename, len(df))
+    return DatasetInfo(**storage.get_metadata(dataset_id))
     pass
 
 @app.get("/datasets/{dataset_id}")
 def get_dataset(dataset_id: int, limit: int = Query(default=100, ge=1)):
     """Return up to limit rows from a stored dataset."""
+    df = storage.get(dataset_id)
+    if df is None:
+        logger.warning("Dataset not found: %d", dataset_id)
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found.")
+
+    records = json.loads(df.head(limit).to_json(orient="records"))
+    logger.info("Retrieved dataset: id=%d, returned_rows=%d", dataset_id, len(records))
+    return {"id": dataset_id, "data": records, "total_rows": len(df)}
     pass
